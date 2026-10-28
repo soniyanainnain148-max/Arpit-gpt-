@@ -6,6 +6,7 @@ export default async function handler(req) {
   if (req.method !== 'POST') {
     return new Response('Method not allowed', { status: 405 });
   }
+
   const key = process.env.ABLITERATION_API_KEY;
   if (!key) {
     return new Response('Server is missing ABLITERATION_API_KEY', { status: 500 });
@@ -15,11 +16,28 @@ export default async function handler(req) {
   try { body = await req.json(); }
   catch { return new Response('Invalid JSON', { status: 400 }); }
 
-  // Only forward the fields we allow, so the key can't be abused for other things
+  // Allow messages with text OR image content (vision support)
+  const rawMessages = Array.isArray(body.messages) ? body.messages : [];
+
+  // Smart truncation: keep last 60 messages but preserve system message
+  let messages = [];
+  const systemMsg = rawMessages.find(m => m.role === 'system');
+  if (systemMsg) messages.push(systemMsg);
+
+  const others = rawMessages.filter(m => m.role !== 'system');
+  messages = messages.concat(others.slice(-60));
+
   const payload = {
     model: process.env.MODEL_NAME || 'abliterated-model',
-    messages: Array.isArray(body.messages) ? body.messages.slice(-40) : [],
+    messages: messages.map(m => {
+      // Support image content blocks
+      if (Array.isArray(m.content)) {
+        return { role: m.role, content: m.content };
+      }
+      return { role: m.role, content: String(m.content || '') };
+    }),
     temperature: Math.min(Math.max(Number(body.temperature) || 0.4, 0), 1.5),
+    max_tokens: Math.min(Number(body.max_tokens) || 4096, 8192),
     stream: true
   };
 
@@ -32,11 +50,20 @@ export default async function handler(req) {
     body: JSON.stringify(payload)
   });
 
+  if (!upstream.ok) {
+    const errText = await upstream.text();
+    return new Response(errText, {
+      status: upstream.status,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+
   return new Response(upstream.body, {
     status: upstream.status,
     headers: {
       'Content-Type': upstream.headers.get('content-type') || 'text/event-stream',
-      'Cache-Control': 'no-cache'
+      'Cache-Control': 'no-cache',
+      'X-Accel-Buffering': 'no'
     }
   });
 }
